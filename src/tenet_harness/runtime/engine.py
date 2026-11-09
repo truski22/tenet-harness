@@ -12,12 +12,18 @@ from langgraph.checkpoint.sqlite import SqliteSaver
 from ..agents import Registry
 from ..errors import BusyError, RunRejected
 from ..messages import Messages
+from ..policy import Policy
 from ..providers import Provider
+from ..redaction import Redactor, default_redact
 from ..runs import RunRequest
 from ..storage import RunStore, Store
+from .approvals import ApprovalBroker
+from .budget import Budget, start_of_day_utc
 from .executor import RunExecutor
 from .gate import ModelGate
+from .governance import Governance
 from .history import thread_messages, visible_history
+from .loops import LoopPolicy
 from .memory import MemoryWorker
 
 log = logging.getLogger(__name__)
@@ -38,18 +44,27 @@ class Runtime:
     ``max_concurrent_runs`` bounds simultaneous runs (one per conversation at a time);
     ``model_concurrency`` bounds simultaneous model calls across runs and background jobs.
     The defaults (1 and 1) keep the original single-user behaviour.
+
+    Governance: ``policy`` decides per tool call (allow / deny / require approval; the default policy
+    allows everything except writes to external toolsets, which need approval). ``loop_policy`` stops
+    agents that repeat themselves (``None`` disables it). ``budget`` limits model tokens. ``redact``
+    masks arguments before they are stored or shown to an approver.
     """
 
     def __init__(self, registry: Registry, provider: Provider, store: RunStore,
                  max_tools: int = 20, run_timeout: float = 300, context_window: int = 8192,
                  messages: Messages = Messages(), recursion_limit: int = 45,
                  max_concurrent_runs: int = 1, model_concurrency: int = 1,
-                 checkpointer: BaseCheckpointSaver | None = None):
+                 checkpointer: BaseCheckpointSaver | None = None, policy: Policy | None = None,
+                 approval_timeout: float = 600.0, loop_policy: LoopPolicy | None = LoopPolicy(),
+                 budget: Budget = Budget(), redact: Redactor = default_redact):
         if max_concurrent_runs < 1:
             raise ValueError("max_concurrent_runs must be at least 1.")
         self.registry, self.provider, self.store = registry, provider, store
         self.messages, self.recursion_limit = messages, recursion_limit
-        self.max_concurrent_runs = max_concurrent_runs
+        self.max_concurrent_runs, self.budget = max_concurrent_runs, budget
+        self.policy = policy or Policy()
+        self.approvals = ApprovalBroker(store, messages, approval_timeout)
         self.gate = ModelGate(model_concurrency)
         self.stopping = Event()
         self._lock = Lock()
@@ -65,7 +80,9 @@ class Runtime:
             checkpointer = saver
         self.checkpointer = checkpointer
         self._executor = RunExecutor(registry, provider, store, self.checkpointer, self.gate, messages,
-                                     self.config, max_tools, run_timeout, context_window)
+                                     self.config, max_tools, run_timeout, context_window,
+                                     Governance(self.policy, self.approvals, store, redact, loop_policy),
+                                     budget.max_tokens_per_run)
         self._memory = MemoryWorker(store, registry, self.gate, messages, lambda: bool(self._runs))
         self._memory.start()
 
@@ -106,6 +123,7 @@ class Runtime:
                 raise RunRejected("IDEMPOTENCY_CONFLICT", self.messages.idempotency_conflict)
             return existing
         self.registry.get(request.agent_id)
+        self._check_daily_budget()
         conversation = self.store.conversation(request.thread_id)
         if conversation and conversation["agent_id"] != request.agent_id:
             raise RunRejected("OTHER_AGENT", self.messages.other_agent)
@@ -128,6 +146,27 @@ class Runtime:
         if created is None:
             raise RuntimeError("Run record missing after creation.")
         return created
+
+    def _check_daily_budget(self) -> None:
+        limit = self.budget.max_tokens_per_day
+        if limit is None:
+            return
+        used = self.store.usage_since(start_of_day_utc())
+        if used["input_tokens"] + used["output_tokens"] >= limit:
+            raise RunRejected("DAILY_BUDGET_EXCEEDED", self.messages.daily_budget_exceeded)
+
+    # --- governance ----------------------------------------------------------------------------
+
+    def pending_approvals(self) -> list[dict]:
+        """Approval requests waiting for a decision, oldest first."""
+        return self.store.approvals(status="pending")
+
+    def resolve_approval(self, approval_id: str, approve: bool, actor: str = "human", note: str = "") -> dict:
+        """Approve or reject a pending request; the waiting run continues immediately."""
+        return self.approvals.resolve(approval_id, approve, actor, note)
+
+    def audit_log(self, run_id: str | None = None) -> list[dict]:
+        return self.store.audit_entries(run_id)
 
     def cancel(self, run_id: str) -> None:
         with self._lock:

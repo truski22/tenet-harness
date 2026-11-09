@@ -119,11 +119,11 @@ def test_tool_failures_become_error_results(tmp_path, failure, message):
         runtime.close()
 
 
-def test_registry_rejects_external_writes_and_reserved_names():
+def test_registry_accepts_external_writes_but_rejects_reserved_names():
+    # External writes are governed by policy and approval at run time, not forbidden at registration.
     write = Tool("w", "Write", Empty, lambda c, a: ToolResult(status="success"), Effect.WRITE)
     context = lambda ctx: SystemMessage(content="x")  # noqa: E731
-    with pytest.raises(ValueError, match="read tools"):
-        Registry().register(AgentDefinition("a", "A", "", (Toolset("e", "E", (write,), external=True),), context))
+    Registry().register(AgentDefinition("a", "A", "", (Toolset("e", "E", (write,), external=True),), context))
     meta = Tool("use_toolset", "x", Empty, lambda c, a: ToolResult(status="success"))
     with pytest.raises(ValueError, match="reserved"):
         Registry().register(AgentDefinition("a", "A", "", (Toolset("e", "E", (meta,)),), context))

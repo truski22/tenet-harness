@@ -6,7 +6,7 @@ from langchain_core.messages import SystemMessage
 
 from .runs import RunContext
 from .routing.base import Router
-from .tools import Effect, Tool, Toolset
+from .tools import Tool, Toolset
 
 
 @dataclass(frozen=True)
@@ -42,10 +42,6 @@ class Registry:
             raise ValueError("Duplicate tool names")
         if any(tool.name == META_TOOL for tool in agent.tools):
             raise ValueError(f"{META_TOOL} is reserved by the runtime")
-        for toolset in agent.toolsets:
-            if toolset.external and any(tool.effect != Effect.READ for tool in toolset.tools):
-                # Writes to external systems must pass human approval; not available yet.
-                raise ValueError(f"External toolset {toolset.id} may only expose read tools.")
         self.agents[agent.id] = agent
 
     def get(self, agent_id: str) -> AgentDefinition:

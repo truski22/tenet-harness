@@ -1,0 +1,24 @@
+# Example policy for an agent that works on tickets and merge requests.
+# Rules are evaluated top to bottom; the first match wins. If nothing matches, the baseline applies:
+# write/destructive tools of external toolsets need human approval; everything else follows `default`.
+version: 1
+default: allow
+rules:
+  - id: production-is-read-only
+    tools: ["gitlab_*"]
+    effects: [write, destructive]
+    when:
+      - {arg: project, op: matches, value: "^prod/"}
+    decision: deny
+    reason: Production projects are read-only for agents.
+
+  - id: sandbox-is-free
+    toolsets: [gitlab]
+    when:
+      - {arg: project, op: in, value: ["sandbox/app", "sandbox/infra"]}
+    decision: allow
+
+  - id: destructive-needs-a-human
+    effects: [destructive]
+    decision: require_approval
+    reason: Destructive actions always need a person to confirm.

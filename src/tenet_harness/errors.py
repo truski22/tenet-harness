@@ -11,6 +11,16 @@ class BusyError(HarnessError):
     code = "BUSY"
 
 
+class LoopDetected(HarnessError):
+    """The agent is repeating itself or failing repeatedly; the run is stopped."""
+    code = "LOOP_DETECTED"
+
+
+class BudgetExceeded(HarnessError):
+    """The run used more model tokens than its budget allows."""
+    code = "BUDGET_EXCEEDED"
+
+
 class RunRejected(HarnessError, ValueError):
     """The request was refused before a run started. ``code`` is stable; the text comes from Messages."""
 

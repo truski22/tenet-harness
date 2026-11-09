@@ -42,6 +42,8 @@ class InMemoryStore:
         self._runs: dict[str, dict] = {}
         self._events: dict[str, list[dict]] = {}
         self._memory: dict[str, dict] = {}
+        self._approvals: dict[str, dict] = {}
+        self._audit: list[dict] = []
 
     def conversations(self) -> list[dict]:
         with self._lock:
@@ -84,11 +86,61 @@ class InMemoryStore:
                 raise ValueError("Duplicate run id.")
             self._runs[run_id] = {"id": run_id, "thread_id": thread_id, "agent_id": agent_id, "user_text": text,
                                   "status": "accepted", "started_at": timestamp(), "finished_at": None,
-                                  "reply": None, "error": None}
+                                  "reply": None, "error": None, "input_tokens": 0, "output_tokens": 0,
+                                  "model_calls": 0}
 
-    def mark_running(self, run_id: str) -> None:
+    def set_status(self, run_id: str, status: str) -> None:
         with self._lock:
-            self._runs[run_id]["status"] = "running"
+            self._runs[run_id]["status"] = status
+
+    def record_usage(self, run_id: str, input_tokens: int, output_tokens: int, calls: int) -> None:
+        with self._lock:
+            self._runs[run_id].update(input_tokens=input_tokens, output_tokens=output_tokens, model_calls=calls)
+
+    def usage_since(self, since: str) -> dict:
+        with self._lock:
+            runs = [r for r in self._runs.values() if r["started_at"] >= since]
+            return {"input_tokens": sum(r.get("input_tokens", 0) for r in runs),
+                    "output_tokens": sum(r.get("output_tokens", 0) for r in runs),
+                    "model_calls": sum(r.get("model_calls", 0) for r in runs), "runs": len(runs)}
+
+    def create_approval(self, approval_id: str, run_id: str, thread_id: str, tool: str, effect: str,
+                        args: dict, rule_id: str | None, reason: str) -> dict:
+        with self._lock:
+            record = {"id": approval_id, "run_id": run_id, "thread_id": thread_id, "tool": tool,
+                      "effect": effect, "args": dict(args), "rule_id": rule_id, "reason": reason,
+                      "status": "pending", "requested_at": timestamp(), "decided_at": None,
+                      "decided_by": None, "note": None}
+            self._approvals[approval_id] = record
+            return dict(record)
+
+    def decide_approval(self, approval_id: str, status: str, actor: str, note: str = "") -> dict | None:
+        with self._lock:
+            record = self._approvals.get(approval_id)
+            if record is None or record["status"] != "pending":
+                return None
+            record.update(status=status, decided_at=timestamp(), decided_by=actor, note=note)
+            return dict(record)
+
+    def approval(self, approval_id: str) -> dict | None:
+        with self._lock:
+            record = self._approvals.get(approval_id)
+            return dict(record) if record else None
+
+    def approvals(self, run_id: str | None = None, status: str | None = None) -> list[dict]:
+        with self._lock:
+            return [dict(a) for a in self._approvals.values()
+                    if (run_id is None or a["run_id"] == run_id) and (status is None or a["status"] == status)]
+
+    def audit(self, run_id: str, thread_id: str, kind: str, tool: str | None = None,
+              data: dict | None = None) -> None:
+        with self._lock:
+            self._audit.append({"id": len(self._audit) + 1, "ts": timestamp(), "run_id": run_id,
+                                "thread_id": thread_id, "kind": kind, "tool": tool, "data": dict(data or {})})
+
+    def audit_entries(self, run_id: str | None = None, limit: int = 500) -> list[dict]:
+        with self._lock:
+            return [dict(e) for e in self._audit if run_id is None or e["run_id"] == run_id][:limit]
 
     def finish(self, run_id: str, status: str, reply: str | None = None, error: str | None = None) -> None:
         with self._lock:

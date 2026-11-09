@@ -16,6 +16,7 @@ toolkit. Python, built on LangGraph.
 | Bounded runs | Tool-call budget, per-run deadline, per-run cooperative cancellation, no automatic replay of side-effecting tools |
 | Concurrency | `max_concurrent_runs` (one active run per conversation) and a shared `ModelGate` that limits simultaneous model calls; `Runtime.exclusive()` for safe model switches |
 | Context control | Per-turn toolset routing (keyword and embedding routers), history trimming to a token budget, `use_toolset` meta-tool for on-demand tools |
+| Governance | Policy-as-code (YAML, first match wins, external writes need approval by default), human approval checkpoints, loop and failure detection, per-run and per-day token budgets, append-only audit log with secret redaction. See [docs/governance.md](docs/governance.md) |
 | Untrusted data | Toolsets marked `external` wrap results as `untrusted_data`; the registry rejects non-read tools on external toolsets |
 | Durability | `RunStore` protocol (SQLite and in-memory implementations), replayable events by sequence number, LangGraph checkpoints, idempotent run IDs, interrupted-run recovery |
 | Evaluation | Rule-based scoring (no LLM judge), pass@1 with Wilson intervals, pass^k reliability, critical-failure gate, baseline comparison |
@@ -26,7 +27,8 @@ toolkit. Python, built on LangGraph.
 
 ```bash
 uv sync --extra integrations
-uv run python examples/echo_agent.py   # scripted model, no Ollama needed
+uv run python examples/echo_agent.py       # scripted model, no Ollama needed
+uv run python examples/approval_agent.py   # an external write paused for human approval
 uv run pytest -q
 ```
 
@@ -52,8 +54,10 @@ failures; unexpected exceptions become a generic error result and never leak det
 ```
 tenet_harness/
   tools.py  agents.py  runs.py  errors.py  messages.py   # contracts: Tool/Toolset, AgentDefinition/Registry, requests and events
+  policy.py  redaction.py                                # policy-as-code, secret masking
   runtime/      engine (Runtime facade) · executor (one run) · binding (toolset selection) · tool_executor
-                graph (agent loop) · gate (model concurrency) · events · history · memory (background worker)
+                approvals · loops · budget · governance · graph (agent loop) · gate (model concurrency)
+                events · history · memory (background worker)
   providers/    Provider protocol · Ollama adapter
   routing/      Router protocol · keyword, embedding and combined routers
   storage/      RunStore protocol · SQLite implementation
@@ -61,6 +65,8 @@ tenet_harness/
   integrations/ Integration protocol, secrets
   testing.py    FakeProvider, InMemoryStore
 ```
+
+Security model and its limits: [docs/threat-model.md](docs/threat-model.md).
 
 ## Design decisions
 
@@ -76,10 +82,10 @@ tenet_harness/
 Done and still open, in order:
 
 1. ~~Split `Runtime._run`; per-run cancellation and concurrent runs; storage protocol~~ (done in 0.1)
-2. Typed run events, `mypy --strict`, provider capabilities and token usage
-3. Provider adapters beyond Ollama (Anthropic, OpenAI-compatible) and a cross-provider eval report
-4. Policy-as-code and a human-approval checkpoint for write / destructive tools
-5. Loop and no-progress detection; token and cost budgets
+2. ~~Policy-as-code, human approval, loop detection, token budgets, audit log~~ (done in 0.1)
+3. Provider adapters beyond Ollama (Anthropic, OpenAI-compatible), provider capabilities, and a cross-provider eval report
+4. Typed run events, `mypy --strict`
+5. Durable approvals that survive a restart; approval endpoints in a server entrypoint
 6. MCP client / server adapters
 7. OpenTelemetry traces and metrics
 8. Postgres store, container image, Helm chart

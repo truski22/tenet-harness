@@ -14,3 +14,8 @@ class Messages:
     cancelled: str = "Stopped. Actions already performed are kept."
     memory_queue_full: str = "Memory not saved: queue is full."
     memory_failed: str = "The memory for this message could not be saved."
+    loop_detected: str = "The agent was stopped because it kept repeating the same actions."
+    budget_exceeded: str = "The agent was stopped because it reached its token budget for this run."
+    daily_budget_exceeded: str = "The daily token budget has been used up."
+    approval_not_found: str = "No such approval request."
+    approval_not_pending: str = "This approval request was already resolved."
