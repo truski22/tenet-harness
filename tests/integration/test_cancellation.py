@@ -4,7 +4,7 @@ import time
 import pytest
 from langchain_core.messages import AIMessage, SystemMessage
 
-from tenet_harness.contracts import AgentDefinition, Registry, RunRequest
+from tenet_harness import AgentDefinition, Registry, RunRequest
 from tenet_harness.runtime import BusyError, Runtime
 from tenet_harness.storage import Store
 

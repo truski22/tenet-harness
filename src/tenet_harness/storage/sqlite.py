@@ -1,3 +1,4 @@
+"""SQLite run store."""
 import json
 import re
 import sqlite3

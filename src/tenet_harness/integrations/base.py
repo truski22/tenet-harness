@@ -2,7 +2,7 @@ import ssl
 from dataclasses import dataclass
 from typing import Protocol
 
-from tenet_harness.contracts import Toolset
+from ..tools import Toolset
 
 
 @dataclass(frozen=True)

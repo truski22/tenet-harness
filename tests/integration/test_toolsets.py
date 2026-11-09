@@ -4,7 +4,7 @@ import pytest
 from langchain_core.messages import AIMessage, SystemMessage, ToolMessage
 from pydantic import BaseModel
 
-from tenet_harness.contracts import (AgentDefinition, Effect, Registry, RunRequest, Tool, ToolError,
+from tenet_harness import (AgentDefinition, Effect, Registry, RunRequest, Tool, ToolError,
                                      ToolResult, Toolset)
 from tenet_harness.routing import CombinedRouter, EmbeddingRouter, KeywordRouter
 from tenet_harness.runtime import Runtime

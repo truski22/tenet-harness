@@ -9,7 +9,7 @@ from pathlib import Path
 from langchain_core.messages import AIMessage, SystemMessage
 from pydantic import BaseModel
 
-from tenet_harness.contracts import AgentDefinition, Effect, Registry, RunRequest, Tool, ToolResult, Toolset
+from tenet_harness import AgentDefinition, Effect, Registry, RunRequest, Tool, ToolResult, Toolset
 from tenet_harness.runtime import Runtime, TERMINAL
 from tenet_harness.storage import Store
 from tenet_harness.testing import FakeProvider

@@ -1,21 +1,8 @@
-"""Per-turn toolset selection so the prompt only carries relevant tool schemas."""
-import logging
+"""Semantic routing by similarity between the message and each toolset's example requests."""
 import math
-import re
 from typing import Callable, Sequence
 
-from .contracts import Router, Toolset
-
-log = logging.getLogger(__name__)
-
-
-class KeywordRouter:
-    """Deterministic match of whole words/phrases from ``Toolset.keywords``."""
-
-    def select(self, text: str, candidates: list[Toolset]) -> list[Toolset]:
-        folded = text.casefold()
-        return [ts for ts in candidates if any(
-            re.search(rf"(?<!\w){re.escape(keyword.casefold())}(?!\w)", folded) for keyword in ts.keywords)]
+from ..tools import Toolset
 
 
 class EmbeddingRouter:
@@ -43,19 +30,3 @@ class EmbeddingRouter:
         scored = sorted(((max(self._cosine(query, self._cache[s]) for s in samples[ts.id]), ts)
                          for ts in candidates), key=lambda pair: pair[0], reverse=True)
         return [ts for score, ts in scored[:self.top_k] if score >= self.threshold]
-
-
-class CombinedRouter:
-    """Union of routers; a failing router (e.g. embeddings offline) is skipped."""
-
-    def __init__(self, *routers: Router):
-        self.routers = routers
-
-    def select(self, text: str, candidates: list[Toolset]) -> list[Toolset]:
-        selected: dict[str, Toolset] = {}
-        for router in self.routers:
-            try:
-                selected.update((ts.id, ts) for ts in router.select(text, candidates))
-            except Exception as exc:
-                log.warning("Router %s unavailable (%s)", type(router).__name__, type(exc).__name__)
-        return [ts for ts in candidates if ts.id in selected]

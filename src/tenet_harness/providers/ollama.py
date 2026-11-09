@@ -1,3 +1,4 @@
+"""Ollama adapter (local inference and embeddings)."""
 from langchain_ollama import ChatOllama, OllamaEmbeddings
 
 
