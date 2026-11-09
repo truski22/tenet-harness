@@ -13,10 +13,11 @@ toolkit. Python, built on LangGraph.
 | Concern | What the harness provides |
 | --- | --- |
 | Tool contracts | `Tool`, `Toolset`, `Effect` (read / write / destructive), validated pydantic inputs, `ToolResult` with explicit status |
-| Bounded runs | One active run, tool-call budget, per-run deadline, cooperative cancellation, no automatic replay of side-effecting tools |
+| Bounded runs | Tool-call budget, per-run deadline, per-run cooperative cancellation, no automatic replay of side-effecting tools |
+| Concurrency | `max_concurrent_runs` (one active run per conversation) and a shared `ModelGate` that limits simultaneous model calls; `Runtime.exclusive()` for safe model switches |
 | Context control | Per-turn toolset routing (keyword and embedding routers), history trimming to a token budget, `use_toolset` meta-tool for on-demand tools |
 | Untrusted data | Toolsets marked `external` wrap results as `untrusted_data`; the registry rejects non-read tools on external toolsets |
-| Durability | SQLite run store, replayable events by sequence number, LangGraph checkpoints, idempotent run IDs, interrupted-run recovery |
+| Durability | `RunStore` protocol (SQLite and in-memory implementations), replayable events by sequence number, LangGraph checkpoints, idempotent run IDs, interrupted-run recovery |
 | Evaluation | Rule-based scoring (no LLM judge), pass@1 with Wilson intervals, pass^k reliability, critical-failure gate, baseline comparison |
 | Testing | `tenet_harness.testing.FakeProvider` for deterministic, offline agent tests |
 | Localisation | Runtime texts are injected through `Messages`; error codes are stable |
@@ -46,26 +47,42 @@ Toolset fields: `summary` (shown by `use_toolset`), `keywords` / `examples` (rou
 `available` (unconfigured toolsets are never bound) and `external`. Raise `ToolError` for expected
 failures; unexpected exceptions become a generic error result and never leak details to the model.
 
+## Package layout
+
+```
+tenet_harness/
+  tools.py  agents.py  runs.py  errors.py  messages.py   # contracts: Tool/Toolset, AgentDefinition/Registry, requests and events
+  runtime/      engine (Runtime facade) · executor (one run) · binding (toolset selection) · tool_executor
+                graph (agent loop) · gate (model concurrency) · events · history · memory (background worker)
+  providers/    Provider protocol · Ollama adapter
+  routing/      Router protocol · keyword, embedding and combined routers
+  storage/      RunStore protocol · SQLite implementation
+  evaluation/   scoring · stats · report
+  integrations/ Integration protocol, secrets
+  testing.py    FakeProvider, InMemoryStore
+```
+
 ## Design decisions
 
 - **Deterministic evaluation, no LLM judge.** Rules check observable behaviour (tools called,
   arguments, resulting state, grounding of numbers). Cheaper, reproducible, and it fails loudly.
 - **Tool allow-lists are code-level boundaries, not a sandbox.** Do not load untrusted third-party tools.
 - **Run events expose actions and status, not hidden reasoning.**
-- **At most one active run per runtime.** Simple and predictable for a local app; not yet suitable
-  for a multi-tenant service (see roadmap).
+- **Concurrency is opt-in.** Defaults (1 run, 1 model call) match a single-user local app. Runs are
+  threads inside one process; scaling out needs a shared store and checkpointer (see roadmap).
 
 ## Roadmap
 
-Honest list of what is *not* built yet, in order:
+Done and still open, in order:
 
-1. Split `Runtime._run` into testable components; per-run cancellation and concurrent runs
-2. Provider adapters beyond Ollama (Anthropic, OpenAI-compatible) and a cross-provider eval report
-3. Policy-as-code and a human-approval checkpoint for write / destructive tools
-4. Loop and no-progress detection; token and cost budgets
-5. MCP client / server adapters
-6. OpenTelemetry traces and metrics
-7. Postgres store, container image, Helm chart
+1. ~~Split `Runtime._run`; per-run cancellation and concurrent runs; storage protocol~~ (done in 0.1)
+2. Typed run events, `mypy --strict`, provider capabilities and token usage
+3. Provider adapters beyond Ollama (Anthropic, OpenAI-compatible) and a cross-provider eval report
+4. Policy-as-code and a human-approval checkpoint for write / destructive tools
+5. Loop and no-progress detection; token and cost budgets
+6. MCP client / server adapters
+7. OpenTelemetry traces and metrics
+8. Postgres store, container image, Helm chart
 
 ## License
 

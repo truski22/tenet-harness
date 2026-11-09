@@ -6,7 +6,7 @@ from typing import Callable
 from ..agents import Registry
 from ..errors import Cancelled
 from ..messages import Messages
-from ..storage import Store
+from ..storage import RunStore
 from .gate import ModelGate
 
 log = logging.getLogger(__name__)
@@ -15,7 +15,7 @@ log = logging.getLogger(__name__)
 class MemoryWorker:
     """Polls the store for queued memory jobs. Yields to live runs: it only starts a job when idle."""
 
-    def __init__(self, store: Store, registry: Registry, gate: ModelGate, messages: Messages,
+    def __init__(self, store: RunStore, registry: Registry, gate: ModelGate, messages: Messages,
                  is_busy: Callable[[], bool]):
         self.store, self.registry, self.gate, self.messages, self.is_busy = store, registry, gate, messages, is_busy
         self.stopping = Event()

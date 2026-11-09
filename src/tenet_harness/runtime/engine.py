@@ -5,24 +5,22 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field
 from threading import Event, Lock, Thread
 
+from langchain_core.runnables import RunnableConfig
+from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.checkpoint.sqlite import SqliteSaver
 
 from ..agents import Registry
-from ..errors import RunRejected
+from ..errors import BusyError, RunRejected
 from ..messages import Messages
 from ..providers import Provider
 from ..runs import RunRequest
-from ..storage import Store
+from ..storage import RunStore, Store
 from .executor import RunExecutor
 from .gate import ModelGate
 from .history import thread_messages, visible_history
 from .memory import MemoryWorker
 
 log = logging.getLogger(__name__)
-
-
-class BusyError(Exception):
-    code = "BUSY"
 
 
 @dataclass
@@ -42,10 +40,11 @@ class Runtime:
     The defaults (1 and 1) keep the original single-user behaviour.
     """
 
-    def __init__(self, registry: Registry, provider: Provider, store: Store,
+    def __init__(self, registry: Registry, provider: Provider, store: RunStore,
                  max_tools: int = 20, run_timeout: float = 300, context_window: int = 8192,
                  messages: Messages = Messages(), recursion_limit: int = 45,
-                 max_concurrent_runs: int = 1, model_concurrency: int = 1):
+                 max_concurrent_runs: int = 1, model_concurrency: int = 1,
+                 checkpointer: BaseCheckpointSaver | None = None):
         if max_concurrent_runs < 1:
             raise ValueError("max_concurrent_runs must be at least 1.")
         self.registry, self.provider, self.store = registry, provider, store
@@ -56,9 +55,15 @@ class Runtime:
         self._lock = Lock()
         self._runs: dict[str, RunHandle] = {}
         self._exclusive = False
-        self.connection = sqlite3.connect(store.path, check_same_thread=False, timeout=30)
-        self.checkpointer = SqliteSaver(self.connection)
-        self.checkpointer.setup()  # create tables now: lazy setup races when runs start together
+        self.connection: sqlite3.Connection | None = None
+        if checkpointer is None:
+            if not isinstance(store, Store):
+                raise ValueError("Pass a checkpointer when the run store is not the SQLite Store.")
+            self.connection = sqlite3.connect(store.path, check_same_thread=False, timeout=30)
+            saver = SqliteSaver(self.connection)
+            saver.setup()  # create tables now: lazy setup races when runs start together
+            checkpointer = saver
+        self.checkpointer = checkpointer
         self._executor = RunExecutor(registry, provider, store, self.checkpointer, self.gate, messages,
                                      self.config, max_tools, run_timeout, context_window)
         self._memory = MemoryWorker(store, registry, self.gate, messages, lambda: bool(self._runs))
@@ -66,7 +71,7 @@ class Runtime:
 
     # --- conversations -------------------------------------------------------------------------
 
-    def config(self, thread_id: str) -> dict:
+    def config(self, thread_id: str) -> RunnableConfig:
         return {"configurable": {"thread_id": thread_id}, "recursion_limit": self.recursion_limit}
 
     def history(self, thread_id: str) -> list[dict]:
@@ -82,12 +87,7 @@ class Runtime:
     def delete_conversation(self, thread_id: str) -> None:
         with self.exclusive():
             self.checkpointer.delete_thread(thread_id)
-            with self.store.connect() as db:
-                db.execute("DELETE FROM memory_jobs WHERE thread_id=?", (thread_id,))
-                db.execute("DELETE FROM run_events WHERE run_id IN "
-                           "(SELECT id FROM runs WHERE thread_id=?)", (thread_id,))
-                db.execute("DELETE FROM runs WHERE thread_id=?", (thread_id,))
-                db.execute("DELETE FROM conversations WHERE thread_id=?", (thread_id,))
+            self.store.delete_thread(thread_id)
 
     # --- runs ----------------------------------------------------------------------------------
 
@@ -124,7 +124,10 @@ class Runtime:
             except Exception:
                 self._runs.pop(request.run_id, None)
                 raise
-        return self.store.run(request.run_id)
+        created = self.store.run(request.run_id)
+        if created is None:
+            raise RuntimeError("Run record missing after creation.")
+        return created
 
     def cancel(self, run_id: str) -> None:
         with self._lock:
@@ -175,4 +178,5 @@ class Runtime:
             if handle.thread:
                 handle.thread.join()
         self._memory.stop()
-        self.connection.close()
+        if self.connection:
+            self.connection.close()

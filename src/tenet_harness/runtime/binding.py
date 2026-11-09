@@ -30,8 +30,8 @@ def select_toolsets(agent: AgentDefinition, toolsets: dict[str, Toolset], text: 
             turns += 1
             if turns == 2:
                 break
-        elif isinstance(message, ToolMessage) and owner.get(message.name) not in (None, *selected):
-            selected.append(owner[message.name])
+        elif isinstance(message, ToolMessage) and owner.get(message.name or "") not in (None, *selected):
+            selected.append(owner[message.name or ""])
     optional = [ts for key, ts in toolsets.items() if key not in selected]
     if agent.router and optional:
         selected += [ts.id for ts in agent.router.select(text, optional)]
@@ -54,7 +54,13 @@ class ToolsetBinder:
                  context_window: int, expose_meta_tool: bool = True):
         self.provider, self.toolsets, self.base_prompt = provider, toolsets, base_prompt
         self.context_window, self.expose_meta_tool = context_window, expose_meta_tool
-        self.binding: Binding | None = None
+        self._binding: Binding | None = None
+
+    @property
+    def binding(self) -> Binding:
+        if self._binding is None:
+            raise RuntimeError("No toolsets bound yet.")
+        return self._binding
 
     def bind(self, selected: list[str]) -> bool:
         """Bind to ``selected``; returns False (keeping the previous binding) if it would not fit."""
@@ -75,7 +81,7 @@ class ToolsetBinder:
         if budget < 500:
             return False
         model = self.provider.chat().bind_tools(schemas) if schemas else self.provider.chat()
-        self.binding = Binding(model, system, budget, {t.name: t for ts in chosen for t in ts.tools},
+        self._binding = Binding(model, system, budget, {t.name: t for ts in chosen for t in ts.tools},
                                list(selected))
         return True
 

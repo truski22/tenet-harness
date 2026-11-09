@@ -1,8 +1,9 @@
 """Reading conversation state back from LangGraph checkpoints."""
 from langchain_core.messages import AIMessage, HumanMessage
+from langchain_core.runnables import RunnableConfig
 
 
-def thread_messages(checkpointer, config: dict) -> list:
+def thread_messages(checkpointer, config: RunnableConfig) -> list:
     checkpoint = checkpointer.get(config)
     return checkpoint.get("channel_values", {}).get("messages", []) if checkpoint else []
 

@@ -96,6 +96,19 @@ class Store:
                 (run_id, thread_id, agent_id, text, "accepted", timestamp()),
             )
 
+    def mark_running(self, run_id: str):
+        with self.connect() as db:
+            db.execute("UPDATE runs SET status='running' WHERE id=?", (run_id,))
+
+    def delete_thread(self, thread_id: str):
+        """Remove a conversation and everything recorded for it (not the LangGraph checkpoints)."""
+        with self.connect() as db:
+            db.execute("DELETE FROM memory_jobs WHERE thread_id=?", (thread_id,))
+            db.execute("DELETE FROM run_events WHERE run_id IN "
+                       "(SELECT id FROM runs WHERE thread_id=?)", (thread_id,))
+            db.execute("DELETE FROM runs WHERE thread_id=?", (thread_id,))
+            db.execute("DELETE FROM conversations WHERE thread_id=?", (thread_id,))
+
     def finish(self, run_id: str, status: str, reply: str | None = None, error: str | None = None):
         with self.connect() as db:
             db.execute("UPDATE runs SET status=?,reply=?,error=?,finished_at=? WHERE id=?",

@@ -1,16 +1,18 @@
 """Execution of a single run, from accepted request to a finished, persisted outcome."""
 import logging
 from threading import Event
+from typing import Callable
 from time import monotonic
 
 from langchain_core.messages import AIMessage, AIMessageChunk, HumanMessage, ToolMessage
+from langchain_core.runnables import RunnableConfig
 
 from ..agents import AgentDefinition, Registry
 from ..errors import Cancelled
 from ..messages import Messages
 from ..providers import Provider
 from ..runs import RunContext, RunRequest
-from ..storage import Store
+from ..storage import RunStore
 from .binding import ToolsetBinder, select_toolsets
 from .events import EventEmitter
 from .gate import ModelGate
@@ -24,8 +26,8 @@ log = logging.getLogger(__name__)
 class RunExecutor:
     """Runs one request to completion. Stateless between runs, so many can execute concurrently."""
 
-    def __init__(self, registry: Registry, provider: Provider, store: Store, checkpointer, gate: ModelGate,
-                 messages: Messages, config_for, max_tools: int, run_timeout: float, context_window: int):
+    def __init__(self, registry: Registry, provider: Provider, store: RunStore, checkpointer, gate: ModelGate,
+                 messages: Messages, config_for: Callable[[str], RunnableConfig], max_tools: int, run_timeout: float, context_window: int):
         self.registry, self.provider, self.store, self.checkpointer = registry, provider, store, checkpointer
         self.gate, self.messages, self.config_for = gate, messages, config_for
         self.max_tools, self.run_timeout, self.context_window = max_tools, run_timeout, context_window
@@ -35,8 +37,7 @@ class RunExecutor:
         emit = EventEmitter(self.store, run_id, thread_id)
         context = RunContext(run_id, thread_id, request.text, emit, cancel, monotonic() + self.run_timeout)
         try:
-            with self.store.connect() as db:
-                db.execute("UPDATE runs SET status='running' WHERE id=?", (run_id,))
+            self.store.mark_running(run_id)
             emit("start")
             reply, previous = self._execute(request, context)
             emit("reply", text=reply)
@@ -63,7 +64,12 @@ class RunExecutor:
         previous = last_assistant_reply(history)
         context.check()
         policy_reply = agent.preflight(context) if agent.preflight else None
-        base_prompt = "Runtime policy response." if policy_reply else agent.context(context).content
+        base_prompt = "Runtime policy response."
+        if not policy_reply:
+            prompt = agent.context(context).content
+            if not isinstance(prompt, str):
+                raise TypeError("Agent context must be plain text.")
+            base_prompt = prompt
         toolsets = {ts.id: ts for ts in agent.toolsets if ts.always_on or ts.available()}
         binder = ToolsetBinder(self.provider, toolsets, base_prompt, self.context_window,
                                expose_meta_tool=not policy_reply)
@@ -78,7 +84,7 @@ class RunExecutor:
         return self._stream(graph, config, request, context), previous
 
     @staticmethod
-    def _repair_interrupted(graph, config: dict) -> None:
+    def _repair_interrupted(graph, config: RunnableConfig) -> None:
         """Close tool calls left open by a crashed run so the model never replays a side effect."""
         outstanding = {}
         for message in graph.get_state(config).values.get("messages", []):
@@ -92,7 +98,7 @@ class RunExecutor:
                             tool_call_id=key, status="error") for key in outstanding]}, as_node="tools")
 
     @staticmethod
-    def _stream(graph, config: dict, request: RunRequest, context: RunContext) -> str:
+    def _stream(graph, config: RunnableConfig, request: RunRequest, context: RunContext) -> str:
         current = None
         for chunk, meta in graph.stream({"messages": [HumanMessage(content=request.text, id=request.run_id)]},
                                         config, stream_mode="messages"):

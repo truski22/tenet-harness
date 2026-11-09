@@ -1,13 +1,13 @@
 """Event emission for one run, with token coalescing."""
 from time import monotonic
 
-from ..storage import Store
+from ..storage import RunStore
 
 
 class EventEmitter:
     """Persists run events; consecutive tokens are merged to keep the event log small."""
 
-    def __init__(self, store: Store, run_id: str, thread_id: str):
+    def __init__(self, store: RunStore, run_id: str, thread_id: str):
         self.store, self.run_id, self.thread_id = store, run_id, thread_id
         self._pending = ""
         self._last_token = monotonic()

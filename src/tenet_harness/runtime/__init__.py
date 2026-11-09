@@ -1,5 +1,6 @@
 from ..runs import TERMINAL
-from .engine import BusyError, Runtime
+from ..errors import BusyError
+from .engine import Runtime
 from .gate import ModelGate
 
 __all__ = ["BusyError", "ModelGate", "Runtime", "TERMINAL"]

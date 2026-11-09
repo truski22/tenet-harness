@@ -10,13 +10,13 @@ class OllamaProvider:
         self.timeout = timeout
         self.context_window = context_window
         self.embedding_model = embedding_model
-        self._embeddings = None
+        self._embeddings: OllamaEmbeddings | None = None
 
     def chat(self, structured: bool = False):
         return ChatOllama(
             model=self.model, base_url=self.url, temperature=0, num_ctx=self.context_window,
             client_kwargs={"timeout": self.timeout, "trust_env": False},
-            **({"format": "json"} if structured else {}),
+            format="json" if structured else None,
         )
 
     def embed(self, texts: list[str]) -> list[list[float]]:

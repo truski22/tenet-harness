@@ -1,7 +1,17 @@
 """Exceptions shared across the harness."""
 
 
-class RunRejected(ValueError):
+class HarnessError(Exception):
+    """Base of errors raised by the harness itself; ``code`` is stable, the message is user-facing."""
+    code = "HARNESS_ERROR"
+
+
+class BusyError(HarnessError):
+    """The runtime cannot accept the request right now (capacity, conversation busy, exclusive use)."""
+    code = "BUSY"
+
+
+class RunRejected(HarnessError, ValueError):
     """The request was refused before a run started. ``code`` is stable; the text comes from Messages."""
 
     def __init__(self, code: str, message: str):

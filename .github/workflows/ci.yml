@@ -11,4 +11,5 @@ jobs:
       - uses: astral-sh/setup-uv@v5
       - run: uv sync --locked --extra integrations --python ${{ matrix.python }}
       - run: uv run ruff check src tests
+      - run: uv run mypy src
       - run: uv run pytest -q
