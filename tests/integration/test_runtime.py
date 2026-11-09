@@ -11,8 +11,7 @@ from conftest import FakeProvider
 
 
 def wait(runtime, run_id):
-    runtime.run_thread.join(timeout=10)
-    assert not runtime.run_thread.is_alive()
+    assert runtime.wait(run_id, 10)
     return runtime.store.run(run_id)
 
 

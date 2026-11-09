@@ -40,7 +40,7 @@ def build(tmp_path, responses, external=None, available=True):
 
 def run(runtime, text, run_id="r1", thread_id="t"):
     runtime.submit(RunRequest(run_id=run_id, thread_id=thread_id, agent_id="a", text=text))
-    runtime.run_thread.join(timeout=10)
+    assert runtime.wait(run_id, 10)
     return runtime.store.run(run_id)
 
 

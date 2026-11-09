@@ -9,6 +9,9 @@ from pydantic import BaseModel, Field
 from .errors import Cancelled
 
 
+TERMINAL = frozenset({"completed", "failed", "cancelled", "interrupted"})
+
+
 class RunEvent(BaseModel):
     version: Literal[1] = 1
     sequence: int

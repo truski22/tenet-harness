@@ -33,7 +33,7 @@ def test_busy_and_cancellation_preserve_terminal_state(tmp_path):
             runtime.submit(request.model_copy(update={"run_id": "r2"}))
         runtime.cancel("r")
         release.set()
-        runtime.run_thread.join(5)
+        assert runtime.wait("r", 5)
         assert runtime.store.run("r")["status"] == "cancelled"
         assert not any(e["type"] == "reply" for e in runtime.store.events("r"))
     finally:
@@ -54,7 +54,7 @@ def test_run_deadline(tmp_path):
     runtime = Runtime(registry, Provider(), Store(tmp_path / "test.sqlite"), run_timeout=.01)
     try:
         runtime.submit(RunRequest(run_id="r", thread_id="t", agent_id="a", text="hello"))
-        runtime.run_thread.join(5)
+        assert runtime.wait("r", 5)
         assert runtime.store.run("r")["status"] == "failed"
     finally:
         runtime.close()
