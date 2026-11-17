@@ -4,6 +4,7 @@ from typing import Any
 
 from langchain_core.messages import AIMessage
 
+from .providers.base import Capabilities
 from .storage.sqlite import timestamp
 
 
@@ -22,9 +23,11 @@ class FakeModel:
 
 
 class FakeProvider:
-    def __init__(self, responses=None):
+    def __init__(self, responses=None, capabilities: Capabilities | None = None):
         self.model_instance = FakeModel(responses)
         self.model = "fake"
+        if capabilities is not None:
+            self.capabilities = capabilities
 
     def chat(self, structured=False):
         return FakeModel([AIMessage(content='{"facts": []}')]) if structured else self.model_instance

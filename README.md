@@ -44,6 +44,20 @@ agent = AgentDefinition(
 )
 ```
 
+## Providers
+
+| Adapter | Install | Notes |
+| --- | --- | --- |
+| `OllamaProvider(model, url, timeout, context_window, embedding_model)` | included | Local inference; also provides `embed()` for the embedding router |
+| `OpenAICompatibleProvider(model, base_url=None, api_key=None, ...)` | `pip install tenet-harness[openai]` | OpenAI and any server speaking its chat API (vLLM, LM Studio, OpenRouter...). Structured calls use JSON mode; set `json_mode=False` for servers without it |
+| `AnthropicProvider(model, api_key=None, max_tokens=4096, ...)` | `pip install tenet-harness[anthropic]` | Claude models. No JSON mode: structured calls ask for JSON and strip code fences |
+
+Keys fall back to `OPENAI_API_KEY` / `ANTHROPIC_API_KEY`. Each adapter publishes `Capabilities`
+(`tool_calling`, `streaming`, `json_mode`, `reports_usage`, `context_window`). The runtime uses the declared
+`context_window` unless you pass one to `Runtime`, and refuses to bind tools to a model that declares no tool
+calling. Embedding routing needs a provider with `embed()` (Ollama today); keyword routing works with any.
+A custom provider needs only `chat(structured=False)` and may expose a `capabilities` attribute.
+
 Toolset fields: `summary` (shown by `use_toolset`), `keywords` / `examples` (routing),
 `instructions` (appended to the prompt only when active), `max_result_chars` (results are truncated),
 `available` (unconfigured toolsets are never bound) and `external`. Raise `ToolError` for expected
@@ -58,7 +72,7 @@ tenet_harness/
   runtime/      engine (Runtime facade) · executor (one run) · binding (toolset selection) · tool_executor
                 approvals · loops · budget · governance · graph (agent loop) · gate (model concurrency)
                 events · history · memory (background worker)
-  providers/    Provider protocol · Ollama adapter
+  providers/    Provider protocol · Capabilities · Ollama, OpenAI-compatible and Anthropic adapters
   routing/      Router protocol · keyword, embedding and combined routers
   storage/      RunStore protocol · SQLite implementation
   evaluation/   scoring · stats · report
@@ -83,7 +97,7 @@ Done and still open, in order:
 
 1. ~~Split `Runtime._run`; per-run cancellation and concurrent runs; storage protocol~~ (done in 0.1)
 2. ~~Policy-as-code, human approval, loop detection, token budgets, audit log~~ (done in 0.1)
-3. Provider adapters beyond Ollama (Anthropic, OpenAI-compatible), provider capabilities, and a cross-provider eval report
+3. ~~Provider adapters (Anthropic, OpenAI-compatible) and provider capabilities~~ (done); a cross-provider eval report is still open
 4. Typed run events, `mypy --strict`
 5. ~~Durable approvals that survive a restart~~ (done); approval endpoints in a server entrypoint
 6. MCP client / server adapters

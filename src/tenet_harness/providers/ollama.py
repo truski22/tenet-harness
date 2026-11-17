@@ -1,6 +1,8 @@
 """Ollama adapter (local inference and embeddings)."""
 from langchain_ollama import ChatOllama, OllamaEmbeddings
 
+from .base import Capabilities
+
 
 class OllamaProvider:
     def __init__(self, model: str, url: str, timeout: float, context_window: int = 8192,
@@ -11,6 +13,11 @@ class OllamaProvider:
         self.context_window = context_window
         self.embedding_model = embedding_model
         self._embeddings: OllamaEmbeddings | None = None
+
+    @property
+    def capabilities(self) -> Capabilities:
+        return Capabilities(tool_calling=True, streaming=True, json_mode=True, reports_usage=True,
+                            context_window=self.context_window)
 
     def chat(self, structured: bool = False):
         return ChatOllama(

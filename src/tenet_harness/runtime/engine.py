@@ -14,7 +14,7 @@ from ..agents import Registry
 from ..errors import BusyError, RunRejected
 from ..messages import Messages
 from ..policy import Policy
-from ..providers import Provider
+from ..providers import Provider, capabilities_of
 from ..redaction import Redactor, default_redact
 from ..runs import RunRequest
 from ..storage import RunStore, Store
@@ -51,6 +51,9 @@ class Runtime:
     agents that repeat themselves (``None`` disables it). ``budget`` limits model tokens. ``redact``
     masks arguments before they are stored or shown to an approver.
 
+    ``context_window`` (tokens for prompt plus history) defaults to the provider's declared
+    ``Capabilities.context_window``, then to 8192.
+
     Approvals are durable. If the runtime stops (or the process dies) while a run waits for a person,
     the run is suspended with its approval still pending. After a restart, ``resolve_approval`` resumes it
     from its checkpoint: an approved call runs exactly once, a rejected one is reported to the model.
@@ -59,7 +62,7 @@ class Runtime:
     """
 
     def __init__(self, registry: Registry, provider: Provider, store: RunStore,
-                 max_tools: int = 20, run_timeout: float = 300, context_window: int = 8192,
+                 max_tools: int = 20, run_timeout: float = 300, context_window: int | None = None,
                  messages: Messages = Messages(), recursion_limit: int = 45,
                  max_concurrent_runs: int = 1, model_concurrency: int = 1,
                  checkpointer: BaseCheckpointSaver | None = None, policy: Policy | None = None,
@@ -89,7 +92,8 @@ class Runtime:
             checkpointer = saver
         self.checkpointer = checkpointer
         self._executor = RunExecutor(registry, provider, store, self.checkpointer, self.gate, messages,
-                                     self.config, max_tools, run_timeout, context_window,
+                                     self.config, max_tools, run_timeout,
+                                     context_window or capabilities_of(provider).context_window or 8192,
                                      Governance(self.policy, self.approvals, store, redact, loop_policy),
                                      budget.max_tokens_per_run)
         self._memory = MemoryWorker(store, registry, self.gate, messages, lambda: bool(self._runs))

@@ -7,7 +7,7 @@ from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage
 from langchain_core.messages.utils import count_tokens_approximately
 
 from ..agents import META_TOOL, AgentDefinition
-from ..providers import Provider
+from ..providers import Provider, capabilities_of
 from ..tools import Tool, ToolResult, Toolset
 
 
@@ -80,6 +80,8 @@ class ToolsetBinder:
         budget = min(self.context_window // 2, self.context_window - overhead - 1800)
         if budget < 500:
             return False
+        if schemas and not capabilities_of(self.provider).tool_calling:
+            raise ValueError("This provider's model does not support tool calling, but the agent has tools.")
         model = self.provider.chat().bind_tools(schemas) if schemas else self.provider.chat()
         self._binding = Binding(model, system, budget, {t.name: t for ts in chosen for t in ts.tools},
                                list(selected))
