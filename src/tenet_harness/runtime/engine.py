@@ -3,6 +3,7 @@ import logging
 import sqlite3
 from contextlib import contextmanager
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from threading import Event, Lock, Thread
 
 from langchain_core.runnables import RunnableConfig
@@ -17,7 +18,7 @@ from ..providers import Provider
 from ..redaction import Redactor, default_redact
 from ..runs import RunRequest
 from ..storage import RunStore, Store
-from .approvals import ApprovalBroker
+from .approvals import EXPIRED, ApprovalBroker
 from .budget import Budget, start_of_day_utc
 from .executor import RunExecutor
 from .gate import ModelGate
@@ -49,6 +50,12 @@ class Runtime:
     allows everything except writes to external toolsets, which need approval). ``loop_policy`` stops
     agents that repeat themselves (``None`` disables it). ``budget`` limits model tokens. ``redact``
     masks arguments before they are stored or shown to an approver.
+
+    Approvals are durable. If the runtime stops (or the process dies) while a run waits for a person,
+    the run is suspended with its approval still pending. After a restart, ``resolve_approval`` resumes it
+    from its checkpoint: an approved call runs exactly once, a rejected one is reported to the model.
+    Requests older than ``approval_ttl`` seconds can no longer be approved after a restart. Resumed runs
+    do not count against ``max_concurrent_runs`` (they finish work that was already accepted).
     """
 
     def __init__(self, registry: Registry, provider: Provider, store: RunStore,
@@ -57,16 +64,18 @@ class Runtime:
                  max_concurrent_runs: int = 1, model_concurrency: int = 1,
                  checkpointer: BaseCheckpointSaver | None = None, policy: Policy | None = None,
                  approval_timeout: float = 600.0, loop_policy: LoopPolicy | None = LoopPolicy(),
-                 budget: Budget = Budget(), redact: Redactor = default_redact):
+                 budget: Budget = Budget(), redact: Redactor = default_redact,
+                 approval_ttl: float = 86400.0):
         if max_concurrent_runs < 1:
             raise ValueError("max_concurrent_runs must be at least 1.")
         self.registry, self.provider, self.store = registry, provider, store
         self.messages, self.recursion_limit = messages, recursion_limit
         self.max_concurrent_runs, self.budget = max_concurrent_runs, budget
         self.policy = policy or Policy()
-        self.approvals = ApprovalBroker(store, messages, approval_timeout)
-        self.gate = ModelGate(model_concurrency)
+        self.approval_ttl = approval_ttl
         self.stopping = Event()
+        self.approvals = ApprovalBroker(store, messages, approval_timeout, self.stopping)
+        self.gate = ModelGate(model_concurrency)
         self._lock = Lock()
         self._runs: dict[str, RunHandle] = {}
         self._exclusive = False
@@ -85,6 +94,7 @@ class Runtime:
                                      budget.max_tokens_per_run)
         self._memory = MemoryWorker(store, registry, self.gate, messages, lambda: bool(self._runs))
         self._memory.start()
+        self._resume_decided()
 
     # --- conversations -------------------------------------------------------------------------
 
@@ -131,6 +141,8 @@ class Runtime:
             if self._exclusive or self.stopping.is_set() or len(self._runs) >= self.max_concurrent_runs \
                     or any(h.thread_id == request.thread_id for h in self._runs.values()):
                 raise BusyError(self.messages.busy)
+            if any(a["thread_id"] == request.thread_id for a in self.store.approvals(status="pending")):
+                raise RunRejected("APPROVAL_PENDING", self.messages.approval_pending)
             handle = RunHandle(request.run_id, request.thread_id)
             try:
                 self.store.touch(request.thread_id, request.agent_id, request.text)
@@ -162,8 +174,52 @@ class Runtime:
         return self.store.approvals(status="pending")
 
     def resolve_approval(self, approval_id: str, approve: bool, actor: str = "human", note: str = "") -> dict:
-        """Approve or reject a pending request; the waiting run continues immediately."""
-        return self.approvals.resolve(approval_id, approve, actor, note)
+        """Approve or reject a pending request. A waiting run continues immediately; a run suspended by a
+        restart is resumed from its checkpoint. Raises ``RunRejected`` if the request is unknown, already
+        resolved or (after a restart) older than ``approval_ttl``."""
+        record = self.store.approval(approval_id)
+        suspended = record is not None and not self._is_live(record["run_id"])
+        if record and suspended and record["status"] == "pending" and self._age(record) > self.approval_ttl:
+            expired = self.store.decide_approval(approval_id, EXPIRED, "system", "Too old to act on.")
+            if expired:
+                self._resume(expired)
+            raise RunRejected("APPROVAL_STALE", self.messages.approval_stale)
+        decided = self.approvals.resolve(approval_id, approve, actor, note)
+        if suspended:
+            self._resume(decided)
+        return decided
+
+    def _is_live(self, run_id: str) -> bool:
+        with self._lock:
+            return run_id in self._runs
+
+    @staticmethod
+    def _age(record: dict) -> float:
+        return (datetime.now(timezone.utc) - datetime.fromisoformat(record["requested_at"])).total_seconds()
+
+    def _resume_decided(self) -> None:
+        """Resume runs whose approval was decided but whose process died before they could continue."""
+        for status in ("approved", "rejected", "expired", "cancelled"):
+            for record in self.store.approvals(status=status):
+                self._resume(record)
+
+    def _resume(self, approval: dict) -> bool:
+        """Continue a suspended run after its approval was decided. False if it cannot start now."""
+        run = self.store.run(approval["run_id"])
+        if run is None or run["status"] != "awaiting_approval":
+            return False
+        request = RunRequest(run_id=run["id"], thread_id=run["thread_id"], agent_id=run["agent_id"],
+                             text=run["user_text"])
+        with self._lock:
+            if self._exclusive or self.stopping.is_set() or any(
+                    h.thread_id == request.thread_id for h in self._runs.values()):
+                return False
+            handle = RunHandle(request.run_id, request.thread_id)
+            self._runs[request.run_id] = handle
+            handle.thread = Thread(target=self._run, args=(request, handle, approval),
+                                   name=f"resume-{request.run_id}", daemon=True)
+            handle.thread.start()
+        return True
 
     def audit_log(self, run_id: str | None = None) -> list[dict]:
         return self.store.audit_entries(run_id)
@@ -183,9 +239,9 @@ class Runtime:
         handle.thread.join(timeout)
         return not handle.thread.is_alive()
 
-    def _run(self, request: RunRequest, handle: RunHandle) -> None:
+    def _run(self, request: RunRequest, handle: RunHandle, resume: dict | None = None) -> None:
         try:
-            self._executor.run(request, handle.cancel)
+            self._executor.run(request, handle.cancel, resume)
         finally:
             with self._lock:
                 self._runs.pop(request.run_id, None)

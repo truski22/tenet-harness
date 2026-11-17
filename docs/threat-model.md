@@ -29,7 +29,7 @@ running agents with tools; the model provider and the tools' backends are treate
 | T4 | Agent loops and burns tokens or hammers a backend | `LoopPolicy` refuses repeats and stops failure streaks; per-run and per-day token budgets; tool-call budget; per-run deadline | Loops that vary their arguments each time are caught only by the failure streak, the tool-call budget and the deadline |
 | T5 | Secrets leak through logs, approvals or the audit trail | `redact` masks credential-like keys before storage and display; logs record exception types, not messages or prompts | Redaction is key-based. A secret inside a free-text value is not detected |
 | T6 | A destructive action is repeated after a crash | Open tool calls are closed with "outcome unknown, do not replay"; the tool is never re-executed automatically; transport retries reuse the run ID | An action that completed just before a crash is recorded as unknown, not as done |
-| T7 | Two callers approve the same request, or approve after it expired | Atomic single resolution in the store; expired and cancelled requests cannot be approved | None known |
+| T7 | Two callers approve the same request, or approve after it expired | Atomic single resolution in the store; expired and cancelled requests cannot be approved; a request suspended by a restart cannot be approved after `approval_ttl` | None known |
 | T8 | A run starves others (resource exhaustion) | `max_concurrent_runs`, one run per conversation, shared `ModelGate`, run and model timeouts | The in-process runtime does not isolate tenants. See below |
 | T9 | Policy is weakened by accident | Policy is a reviewed file; first-match semantics are explicit; the external-write baseline needs an explicit `allow` rule to lift | The policy file is trusted. Protect it like code |
 
@@ -44,7 +44,7 @@ running agents with tools; the model provider and the tools' backends are treate
 - **Audit immutability.** The table is append-only by convention. Use database permissions or an external
   write-once sink for tamper evidence.
 - **Model-provider risks** (data retention, jailbreaks of the model itself, supply chain of model weights).
-- **Durable human-in-the-loop across restarts.** Approvals are held in memory; a restart expires them.
+- **Approver authentication.** Approvals survive restarts, but the runtime still records `actor` without verifying it.
 
 ## Evidence
 

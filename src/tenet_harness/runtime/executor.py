@@ -1,14 +1,14 @@
 """Execution of a single run, from accepted request to a finished, persisted outcome."""
 import logging
 from threading import Event
-from typing import Callable
+from typing import Any, Callable
 from time import monotonic
 
 from langchain_core.messages import AIMessage, AIMessageChunk, HumanMessage, ToolMessage
 from langchain_core.runnables import RunnableConfig
 
 from ..agents import AgentDefinition, Registry
-from ..errors import BudgetExceeded, Cancelled, LoopDetected
+from ..errors import BudgetExceeded, Cancelled, LoopDetected, Suspended
 from ..messages import Messages
 from ..providers import Provider
 from ..runs import RunContext, RunRequest
@@ -20,7 +20,7 @@ from .gate import ModelGate
 from .governance import Governance
 from .graph import ModelNode, build_graph
 from .history import last_assistant_reply, thread_messages
-from .tool_executor import ToolExecutor
+from .tool_executor import OUTCOME_UNKNOWN, ToolExecutor
 
 log = logging.getLogger(__name__)
 
@@ -36,21 +36,24 @@ class RunExecutor:
         self.max_tools, self.run_timeout, self.context_window = max_tools, run_timeout, context_window
         self.governance, self.token_limit = governance, token_limit
 
-    def run(self, request: RunRequest, cancel: Event) -> None:
+    def run(self, request: RunRequest, cancel: Event, resume: dict | None = None) -> None:
+        """Execute a run. With ``resume`` (a decided approval record) continue a suspended run instead."""
         run_id, thread_id = request.run_id, request.thread_id
         emit = EventEmitter(self.store, run_id, thread_id)
         context = RunContext(run_id, thread_id, request.text, emit, cancel, monotonic() + self.run_timeout)
-        meter = UsageMeter(self.token_limit)
+        meter = UsageMeter(self.token_limit, self.store.run(run_id) if resume else None)
         try:
             self.store.set_status(run_id, "running")
-            emit("start")
-            reply, previous = self._execute(request, context, meter)
+            emit("resumed" if resume else "start")
+            reply, previous = self._execute(request, context, meter, resume)
             emit("reply", text=reply)
             agent = self.registry.get(request.agent_id)
             if agent.memorize:
                 self._queue_memory(agent, request, previous, emit)
             emit("done", status="completed", data=meter.summary())
             self.store.finish(run_id, "completed", reply=reply)
+        except Suspended:
+            emit("suspended")  # the run stays awaiting_approval; resolving the approval resumes it
         except Cancelled:
             emit("done", status="cancelled", message=self.messages.cancelled, data=meter.summary())
             self.store.finish(run_id, "cancelled")
@@ -72,14 +75,16 @@ class RunExecutor:
         finally:
             self.store.record_usage(run_id, meter.input_tokens, meter.output_tokens, meter.calls)
 
-    def _execute(self, request: RunRequest, context: RunContext, meter: UsageMeter) -> tuple[str, str]:
+    def _execute(self, request: RunRequest, context: RunContext, meter: UsageMeter,
+                 resume: dict | None = None) -> tuple[str, str]:
         """Prepare the turn, run the agent graph; returns (final reply, previous assistant reply)."""
         agent = self.registry.get(request.agent_id)
         config = self.config_for(request.thread_id)
         history = thread_messages(self.checkpointer, config)
-        previous = last_assistant_reply(history)
+        turn = next((i for i, m in enumerate(history) if m.id == request.run_id), len(history))
+        previous = last_assistant_reply(history[:turn])
         context.check()
-        policy_reply = agent.preflight(context) if agent.preflight else None
+        policy_reply = agent.preflight(context) if agent.preflight and not resume else None
         base_prompt = "Runtime policy response."
         if not policy_reply:
             prompt = agent.context(context).content
@@ -96,28 +101,49 @@ class RunExecutor:
         executor = ToolExecutor(context, binder, toolsets, self.max_tools, self.governance)
         graph = build_graph(ModelNode(context, binder, agent, self.gate, policy_reply, meter), executor,
                             self.checkpointer)
+        if resume:
+            self._answer_open_calls(graph, config, executor, resume, context)
+            return self._stream(graph, config, None, context), previous
         self._repair_interrupted(graph, config)
-        return self._stream(graph, config, request, context), previous
+        return self._stream(graph, config, {"messages": [HumanMessage(content=request.text, id=request.run_id)]},
+                            context), previous
 
     @staticmethod
-    def _repair_interrupted(graph, config: RunnableConfig) -> None:
-        """Close tool calls left open by a crashed run so the model never replays a side effect."""
-        outstanding = {}
+    def _outstanding(graph, config: RunnableConfig) -> dict[Any, Any]:
+        """Tool calls in the checkpoint that no tool message has answered, in call order."""
+        outstanding: dict[Any, Any] = {}
         for message in graph.get_state(config).values.get("messages", []):
             if isinstance(message, AIMessage):
                 outstanding.update({c["id"]: c for c in message.tool_calls})
             elif isinstance(message, ToolMessage):
                 outstanding.pop(message.tool_call_id, None)
+        return outstanding
+
+    @classmethod
+    def _repair_interrupted(cls, graph, config: RunnableConfig) -> None:
+        """Close tool calls left open by a crashed run so the model never replays a side effect."""
+        outstanding = cls._outstanding(graph, config)
         if outstanding:
             graph.update_state(config, {"messages": [
-                ToolMessage(content="Previous run interrupted; action outcome unknown. Do not replay.",
-                            tool_call_id=key, status="error") for key in outstanding]}, as_node="tools")
+                ToolMessage(content=OUTCOME_UNKNOWN, tool_call_id=key, status="error")
+                for key in outstanding]}, as_node="tools")
+
+    @classmethod
+    def _answer_open_calls(cls, graph, config: RunnableConfig, executor: ToolExecutor, approval: dict,
+                           context: RunContext) -> None:
+        """Apply a decided approval to the suspended turn so the graph can continue from its checkpoint."""
+        outstanding = cls._outstanding(graph, config)
+        if approval["tool_call_id"] not in outstanding:
+            raise ValueError("The suspended tool call is no longer in the conversation.")
+        context.emit("approval_resolved", name=approval["tool"], status=approval["status"],
+                     data={"approval_id": approval["id"], "decided_by": approval["decided_by"]})
+        graph.update_state(config, {"messages": executor.resume(list(outstanding.values()), approval)},
+                           as_node="tools")
 
     @staticmethod
-    def _stream(graph, config: RunnableConfig, request: RunRequest, context: RunContext) -> str:
+    def _stream(graph, config: RunnableConfig, payload: dict | None, context: RunContext) -> str:
         current = None
-        for chunk, meta in graph.stream({"messages": [HumanMessage(content=request.text, id=request.run_id)]},
-                                        config, stream_mode="messages"):
+        for chunk, meta in graph.stream(payload, config, stream_mode="messages"):
             context.check()
             if meta.get("langgraph_node") != "agent" or not isinstance(chunk, AIMessageChunk):
                 continue

@@ -27,11 +27,13 @@ def start_of_day_utc() -> str:
 class UsageMeter:
     """Tokens consumed by one run. Uses provider-reported usage; estimates it when absent."""
 
-    def __init__(self, limit: int | None = None):
+    def __init__(self, limit: int | None = None, prior: dict | None = None):
+        """``prior`` carries usage already recorded for a run that is being resumed."""
+        prior = prior or {}
         self.limit = limit
-        self.input_tokens = 0
-        self.output_tokens = 0
-        self.calls = 0
+        self.input_tokens = prior.get("input_tokens", 0)
+        self.output_tokens = prior.get("output_tokens", 0)
+        self.calls = prior.get("model_calls", 0)
         self.estimated_calls = 0
 
     @property

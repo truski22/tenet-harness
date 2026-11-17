@@ -61,8 +61,24 @@ for request in runtime.pending_approvals():
 - Cancelling the run cancels the request. The run's deadline does not advance while it waits for a person.
 - Arguments shown to the approver and stored in the audit log pass through `redact`
   (default: values of keys that look like credentials are masked). The tool itself receives the real values.
-- **Not durable across a process restart.** Waiting is in-process. On restart, pending requests are marked
-  `expired`, the run is marked `interrupted`, and the interrupted tool call is never replayed.
+- **Durable across restarts.** If the runtime closes (`Runtime.close()`) or the process dies while a run waits,
+  the run stays `awaiting_approval`, the request stays `pending`, and a `suspended` event is recorded. After a
+  restart, `resolve_approval` resumes the run from its LangGraph checkpoint (a `resumed` event, no second
+  `start`):
+  - **approved**: the call runs exactly once, with the real arguments from the checkpoint (the stored copy is
+    redacted), and the model continues from its result;
+  - **rejected / expired**: the model is told the action was not approved and must not retry it.
+  - Other tool calls from the same model turn are never replayed: their results were lost with the process,
+    so the model is told their outcome is unknown.
+  - Token usage accumulates across the suspension. Resumed runs get a fresh deadline and do not count against
+    `max_concurrent_runs`.
+  - A suspended request older than `approval_ttl` (default 24 h) can no longer be approved:
+    `RunRejected("APPROVAL_STALE")`, and the run continues as "expired".
+  - While a run is suspended its conversation accepts no new messages (`RunRejected("APPROVAL_PENDING")`);
+    deleting the conversation cancels the request.
+  - Requests recorded before 0.2 carry no tool call id and cannot resume: they expire and their run is
+    marked `interrupted`.
+  The server entrypoint should list `pending_approvals()` on startup and show them to an approver.
 
 ## Loop and failure detection
 
@@ -97,7 +113,7 @@ Append-only table `audit_log`, readable with `runtime.audit_log(run_id)`:
 | kind | When |
 | --- | --- |
 | `tool_decision` | After policy evaluation, before anything runs. Includes decision, rule id, reason, redacted arguments |
-| `approval_approved` / `approval_rejected` / `approval_expired` / `approval_cancelled` | How a request ended |
+| `approval_approved` / `approval_rejected` / `approval_expired` / `approval_cancelled` | How a request ended (`resumed: true` if the run was resumed after a restart) |
 | `tool_outcome` | After execution: `success`, `error` or `clarification_required` |
 | `loop_blocked` / `loop_detected` / `budget_exceeded` | Why a run was refused or stopped |
 

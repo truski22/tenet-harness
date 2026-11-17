@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 
 def timestamp() -> str:
@@ -50,6 +50,9 @@ class Store:
                 "rule_id TEXT, reason TEXT NOT NULL, status TEXT NOT NULL, requested_at TEXT NOT NULL, "
                 "decided_at TEXT, decided_by TEXT, note TEXT)"
             )
+            approval_columns = {r[1] for r in db.execute("PRAGMA table_info(approvals)")}
+            if "tool_call_id" not in approval_columns:
+                db.execute("ALTER TABLE approvals ADD COLUMN tool_call_id TEXT NOT NULL DEFAULT ''")
             db.execute(
                 "CREATE TABLE IF NOT EXISTS audit_log (id INTEGER PRIMARY KEY AUTOINCREMENT, ts TEXT NOT NULL, "
                 "run_id TEXT NOT NULL, thread_id TEXT NOT NULL, kind TEXT NOT NULL, tool TEXT, data TEXT NOT NULL)"
@@ -68,9 +71,14 @@ class Store:
                 db.execute("INSERT INTO harness_schema VALUES (?)", (SCHEMA_VERSION,))
             elif row[0] < SCHEMA_VERSION:
                 db.execute("UPDATE harness_schema SET version=?", (SCHEMA_VERSION,))
-            # A pending approval belongs to a run that no longer exists in this process.
+            # Pending approvals survive a restart: the run is suspended and resumes when someone decides.
+            # Only those that cannot be resumed expire: no tool call to answer (written before 0.2) or a
+            # run that is not waiting for them.
             db.execute("UPDATE approvals SET status='expired',decided_at=?,decided_by='system' "
-                       "WHERE status='pending'", (timestamp(),))
+                       "WHERE status='pending' AND (tool_call_id='' OR run_id NOT IN "
+                       "(SELECT id FROM runs WHERE status='awaiting_approval'))", (timestamp(),))
+            db.execute("UPDATE runs SET status='interrupted',finished_at=? WHERE status='awaiting_approval' "
+                       "AND id NOT IN (SELECT run_id FROM approvals WHERE tool_call_id<>'')", (timestamp(),))
             db.execute(
                 "UPDATE runs SET status='interrupted',finished_at=? "
                 "WHERE status IN ('accepted','running')", (timestamp(),)
@@ -136,12 +144,12 @@ class Store:
             return {"input_tokens": row[0], "output_tokens": row[1], "model_calls": row[2], "runs": row[3]}
 
     def create_approval(self, approval_id: str, run_id: str, thread_id: str, tool: str, effect: str,
-                        args: dict, rule_id: str | None, reason: str) -> dict:
+                        args: dict, rule_id: str | None, reason: str, tool_call_id: str = "") -> dict:
         with self.connect() as db:
             db.execute("INSERT INTO approvals (id,run_id,thread_id,tool,effect,args,rule_id,reason,status,"
-                       "requested_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
+                       "requested_at,tool_call_id) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
                        (approval_id, run_id, thread_id, tool, effect, json.dumps(args, ensure_ascii=False),
-                        rule_id, reason, "pending", timestamp()))
+                        rule_id, reason, "pending", timestamp(), tool_call_id))
         record = self.approval(approval_id)
         assert record is not None
         return record
@@ -194,6 +202,8 @@ class Store:
     def delete_thread(self, thread_id: str):
         """Remove a conversation and everything recorded for it (not the LangGraph checkpoints)."""
         with self.connect() as db:
+            db.execute("UPDATE approvals SET status='cancelled',decided_at=?,decided_by='system' "
+                       "WHERE thread_id=? AND status='pending'", (timestamp(), thread_id))
             db.execute("DELETE FROM memory_jobs WHERE thread_id=?", (thread_id,))
             db.execute("DELETE FROM run_events WHERE run_id IN "
                        "(SELECT id FROM runs WHERE thread_id=?)", (thread_id,))

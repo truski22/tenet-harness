@@ -33,5 +33,9 @@ class Cancelled(Exception):
     pass
 
 
+class Suspended(Exception):
+    """The runtime is shutting down while a run waits for approval; the run is kept to resume later."""
+
+
 class ToolError(Exception):
     """Expected tool failure; the message is safe to show to the model and the user."""

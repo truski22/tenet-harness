@@ -73,6 +73,9 @@ class InMemoryStore:
                 self._runs.pop(run_id)
                 self._events.pop(run_id, None)
             self._memory = {k: v for k, v in self._memory.items() if v["thread_id"] != thread_id}
+            for approval in self._approvals.values():
+                if approval["thread_id"] == thread_id and approval["status"] == "pending":
+                    approval.update(status="cancelled", decided_at=timestamp(), decided_by="system")
             self._conversations.pop(thread_id, None)
 
     def run(self, run_id: str) -> dict | None:
@@ -105,12 +108,12 @@ class InMemoryStore:
                     "model_calls": sum(r.get("model_calls", 0) for r in runs), "runs": len(runs)}
 
     def create_approval(self, approval_id: str, run_id: str, thread_id: str, tool: str, effect: str,
-                        args: dict, rule_id: str | None, reason: str) -> dict:
+                        args: dict, rule_id: str | None, reason: str, tool_call_id: str = "") -> dict:
         with self._lock:
             record = {"id": approval_id, "run_id": run_id, "thread_id": thread_id, "tool": tool,
                       "effect": effect, "args": dict(args), "rule_id": rule_id, "reason": reason,
                       "status": "pending", "requested_at": timestamp(), "decided_at": None,
-                      "decided_by": None, "note": None}
+                      "decided_by": None, "note": None, "tool_call_id": tool_call_id}
             self._approvals[approval_id] = record
             return dict(record)
 

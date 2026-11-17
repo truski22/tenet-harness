@@ -6,7 +6,7 @@ from threading import Event, Lock
 from time import monotonic
 from typing import Any
 
-from ..errors import Cancelled, RunRejected
+from ..errors import Cancelled, RunRejected, Suspended
 from ..messages import Messages
 from ..policy import PolicyDecision
 from ..runs import RunContext
@@ -19,12 +19,15 @@ APPROVED, REJECTED, EXPIRED = "approved", "rejected", "expired"
 class ApprovalBroker:
     """Creates approval requests, blocks the requesting run and wakes it when someone resolves them.
 
-    Waiting is in-process: if the process stops, pending requests are marked expired on restart and the
-    interrupted tool call is never replayed. While waiting, the run's deadline does not run.
+    A live run waits in-process for ``timeout`` seconds. If the runtime shuts down meanwhile, or the process
+    dies, the request stays pending in the store and the run is suspended; ``Runtime.resolve_approval``
+    resumes it later from its checkpoint. While waiting, the run's deadline does not run.
     """
 
-    def __init__(self, store: RunStore, messages: Messages, timeout: float = 600.0):
+    def __init__(self, store: RunStore, messages: Messages, timeout: float = 600.0,
+                 stopping: Event | None = None):
         self.store, self.messages, self.timeout = store, messages, timeout
+        self.stopping = stopping or Event()
         self._waiters: dict[str, Event] = {}
         self._lock = Lock()
 
@@ -39,7 +42,8 @@ class ApprovalBroker:
         self.store.set_status(context.run_id, "awaiting_approval")
         try:
             self.store.create_approval(approval_id, context.run_id, context.thread_id, tool.name,
-                                       tool.effect.value, args, decision.rule_id, decision.reason)
+                                       tool.effect.value, args, decision.rule_id, decision.reason,
+                                       context.tool_call_id)
         except Exception:
             with self._lock:
                 self._waiters.pop(approval_id, None)
@@ -55,16 +59,23 @@ class ApprovalBroker:
                 if current and current["status"] != "pending":
                     break  # resolved through the store (for example by another process)
                 if context.cancel.is_set():
+                    if self.stopping.is_set():
+                        raise Suspended("Runtime stopped while awaiting approval")
                     self.store.decide_approval(approval_id, "cancelled", "system")
                     raise Cancelled("Run cancelled while awaiting approval")
                 if monotonic() - started >= self.timeout:
                     self.store.decide_approval(approval_id, EXPIRED, "system", "Approval timed out.")
                     break
+        except Suspended:
+            raise  # status stays awaiting_approval and the request stays pending
+        except BaseException:
+            self.store.set_status(context.run_id, "running")
+            raise
         finally:
             with self._lock:
                 self._waiters.pop(approval_id, None)
             context.deadline += monotonic() - started
-            self.store.set_status(context.run_id, "running")
+        self.store.set_status(context.run_id, "running")
         record = self.store.approval(approval_id)
         status = record["status"] if record else EXPIRED
         context.emit("approval_resolved", name=tool.name, status=status,

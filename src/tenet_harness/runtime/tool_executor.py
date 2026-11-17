@@ -34,6 +34,14 @@ def bounded(result: ToolResult, limit: int) -> ToolResult:
     return result.model_copy(update={"data": {"truncated": True, "partial_json": partial}})
 
 
+OUTCOME_UNKNOWN = "Previous run interrupted; action outcome unknown. Do not replay."
+
+
+def not_approved(status: str) -> str:
+    return (f"The action was not approved ({status}). "
+            "Do not retry it or look for a way around it; tell the user.")
+
+
 def execute_tool(context: RunContext, tool: Tool, raw_args) -> ToolResult:
     """Validate arguments and run one tool; expected failures become results, never exceptions."""
     try:
@@ -71,7 +79,7 @@ class ToolExecutor:
 
     def run(self, tool_calls: list[dict]) -> list[ToolMessage]:
         context, emit = self.context, self.context.emit
-        results = []
+        results: list[ToolMessage] = []
         for call in tool_calls:
             context.check()
             self.used += 1
@@ -87,19 +95,57 @@ class ToolExecutor:
                 result = ToolResult(status="error", message="Tool is not permitted for this agent.")
             else:
                 result, executed_args = self._call(self.binder.binding.tools[call["name"]], source, call["args"])
-            if source:
-                result = bounded(result, source.max_result_chars)
-            emit("tool_result", name=call["name"], status=result.status, data=result.model_dump())
+            message = self._message(call, source, result)
             if executed_args is not None and self.loops:
                 self.loops.record(call["name"], executed_args, result.status)
-            if result.status == "success":
-                context.successful_tools.add(call["name"])
-            content = result.model_dump_json()
-            if source and source.external:
-                content = json.dumps({"source": source.id, "untrusted_data": True, **result.model_dump()},
-                                     ensure_ascii=False)
-            results.append(ToolMessage(content=content, tool_call_id=call["id"], name=call["name"],
-                                       status="success" if result.status == "success" else "error"))
+            results.append(message)
+        return results
+
+    def _message(self, call: dict, source: Toolset | None, result: ToolResult) -> ToolMessage:
+        """Bound the result, announce it and turn it into the tool message the model will read."""
+        context = self.context
+        if source:
+            result = bounded(result, source.max_result_chars)
+        context.emit("tool_result", name=call["name"], status=result.status, data=result.model_dump())
+        if result.status == "success":
+            context.successful_tools.add(call["name"])
+        content = result.model_dump_json()
+        if source and source.external:
+            content = json.dumps({"source": source.id, "untrusted_data": True, **result.model_dump()},
+                                 ensure_ascii=False)
+        return ToolMessage(content=content, tool_call_id=call["id"], name=call["name"],
+                           status="success" if result.status == "success" else "error")
+
+    def resume(self, calls: list[dict], approval: dict) -> list[ToolMessage]:
+        """Answer the tool calls a suspended run left open, after its approval request was decided.
+
+        Only the approved call runs, and only if it is the exact call the approval was recorded for.
+        Its siblings from the same model turn are closed as "outcome unknown": earlier ones may have run
+        before the crash and nothing recorded their result, so they are never replayed.
+        """
+        context, audit = self.context, self.governance.store.audit
+        results = []
+        for call in calls:
+            context.check()
+            context.tool_call_id = call["id"]
+            if call["id"] != approval["tool_call_id"]:
+                results.append(ToolMessage(content=OUTCOME_UNKNOWN, tool_call_id=call["id"], name=call["name"],
+                                           status="error"))
+                continue
+            context.emit("tool_start", name=call["name"])
+            source = self.owner.get(call["name"])
+            tool = next((t for t in source.tools if t.name == call["name"]), None) if source else None
+            status = approval["status"]
+            audit(context.run_id, context.thread_id, "approval_" + status, call["name"],
+                  {"rule_id": approval["rule_id"], "resumed": True})
+            if status == APPROVED and tool is not None and tool.name == approval["tool"]:
+                result = execute_tool(context, tool, call["args"])
+            elif status == APPROVED:
+                result = ToolResult(status="error", message="Tool is not permitted for this agent.")
+            else:
+                result = ToolResult(status="error", message=not_approved(status))
+            audit(context.run_id, context.thread_id, "tool_outcome", call["name"], {"status": result.status})
+            results.append(self._message(call, source, result))
         return results
 
     def _call(self, tool: Tool, toolset: Toolset | None, raw_args) -> tuple[ToolResult, dict | None]:
@@ -131,8 +177,7 @@ class ToolExecutor:
             if status == APPROVED:
                 result = run_tool(context, tool, parsed)
             else:
-                result = ToolResult(status="error", message=f"The action was not approved ({status}). "
-                                    "Do not retry it or look for a way around it; tell the user.")
+                result = ToolResult(status="error", message=not_approved(status))
         else:
             result = run_tool(context, tool, parsed)
         audit(context.run_id, context.thread_id, "tool_outcome", tool.name, {"status": result.status})

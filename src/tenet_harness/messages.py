@@ -19,3 +19,5 @@ class Messages:
     daily_budget_exceeded: str = "The daily token budget has been used up."
     approval_not_found: str = "No such approval request."
     approval_not_pending: str = "This approval request was already resolved."
+    approval_pending: str = "This conversation is waiting for an approval decision."
+    approval_stale: str = "This approval request is too old to act on."

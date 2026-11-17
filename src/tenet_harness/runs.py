@@ -19,7 +19,7 @@ class RunEvent(BaseModel):
     thread_id: str
     type: Literal["start", "reset", "token", "tool_start", "tool_result", "reply",
                   "memory_queued", "memory_saved", "memory_failed", "warning", "error", "done",
-                  "approval_required", "approval_resolved", "loop_detected", "budget_exceeded"]
+                  "approval_required", "approval_resolved", "resumed", "suspended", "loop_detected", "budget_exceeded"]
     text: str | None = None
     message: str | None = None
     name: str | None = None

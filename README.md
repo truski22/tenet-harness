@@ -85,7 +85,7 @@ Done and still open, in order:
 2. ~~Policy-as-code, human approval, loop detection, token budgets, audit log~~ (done in 0.1)
 3. Provider adapters beyond Ollama (Anthropic, OpenAI-compatible), provider capabilities, and a cross-provider eval report
 4. Typed run events, `mypy --strict`
-5. Durable approvals that survive a restart; approval endpoints in a server entrypoint
+5. ~~Durable approvals that survive a restart~~ (done); approval endpoints in a server entrypoint
 6. MCP client / server adapters
 7. OpenTelemetry traces and metrics
 8. Postgres store, container image, Helm chart
